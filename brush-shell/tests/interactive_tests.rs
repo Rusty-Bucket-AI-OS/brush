@@ -100,6 +100,120 @@ fn run_in_bg_then_fg() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test_with::executable(sh, sleep)]
+#[test]
+fn resume_suspended_pipeline_in_foreground() -> anyhow::Result<()> {
+    let mut session = start_shell_session()?;
+    session.expect_prompt()?;
+
+    // `fg` must continue every process of the pipeline, and give the terminal to their group,
+    // or Ctrl+C can't end the pipeline.
+    session.send_line("sleep 30 | sh -c 'echo ready-$((1 + 1)); exec sleep 31'")?;
+    session.expect("ready-2")?;
+    session.suspend()?;
+    session
+        .expect_prompt()
+        .context("Prompt after suspending pipeline")?;
+
+    // (`fg` shows the job's command once it has continued it.)
+    session.send_line("fg")?;
+    session.expect("exec sleep 31")?;
+    session.interrupt()?;
+    session
+        .expect_prompt()
+        .context("Prompt after interrupting the resumed pipeline")?;
+
+    let jobs_output = session.exec_output("jobs")?;
+    assert_eq!(jobs_output.trim(), "", "the pipeline should be gone");
+
+    session.exit()?;
+
+    Ok(())
+}
+
+#[test_with::executable(sh, sleep, pgrep)]
+#[test]
+fn kill_suspended_pipeline() -> anyhow::Result<()> {
+    let mut session = start_shell_session()?;
+    session.expect_prompt()?;
+
+    session.send_line("sleep 1017 | sh -c 'echo ready-$((1 + 1)); exec sleep 1018'")?;
+    session.expect("ready-2")?;
+    session.suspend()?;
+    session
+        .expect_prompt()
+        .context("Prompt after suspending pipeline")?;
+
+    // Killing the job kills all of its pipeline's processes.
+    session.send_line("kill -9 %1; wait")?;
+    session.expect_prompt()?;
+    let jobs_output = session.exec_output("jobs")?;
+    assert_eq!(jobs_output.trim(), "", "the job should be gone");
+    let survivors = session.exec_output("pgrep -f -s $$ '^sleep 101[78]$' | wc -l")?;
+    assert_eq!(survivors.trim(), "0", "every process should be gone");
+
+    session.exit()?;
+
+    Ok(())
+}
+
+#[test_with::executable(sh, sleep, pgrep)]
+#[test]
+fn terminate_suspended_pipeline() -> anyhow::Result<()> {
+    let mut session = start_shell_session()?;
+    session.expect_prompt()?;
+
+    session.send_line("sleep 1027 | sh -c 'echo ready-$((1 + 1)); exec sleep 1028'")?;
+    session.expect("ready-2")?;
+    session.suspend()?;
+    session
+        .expect_prompt()
+        .context("Prompt after suspending pipeline")?;
+
+    // A stopped job sent a request to terminate is continued, so that it acts on it.
+    session.send_line("kill -TERM %1; wait")?;
+    session.expect_prompt()?;
+    let jobs_output = session.exec_output("jobs")?;
+    assert_eq!(jobs_output.trim(), "", "the job should be gone");
+    let survivors = session.exec_output("pgrep -f -s $$ '^sleep 102[78]$' | wc -l")?;
+    assert_eq!(survivors.trim(), "0", "every process should be gone");
+
+    session.exit()?;
+
+    Ok(())
+}
+
+#[test_with::executable(sh, head, sort)]
+#[test]
+fn resume_pipeline_stopped_in_background() -> anyhow::Result<()> {
+    let mut session = start_shell_session()?;
+    session.expect_prompt()?;
+
+    // In the background, `head` reads from the terminal, which stops the pipeline; `fg` must
+    // give it the terminal, and continue it, without its stopping again.
+    session.send_line("sh -c 'echo ready-$((1 + 1)) >&2; exec head -n 2' | sort")?;
+    session.expect("ready-2")?;
+    session.suspend()?;
+    session
+        .expect_prompt()
+        .context("Prompt after suspending pipeline")?;
+    session.send_line("bg")?;
+    session.expect_prompt()?;
+
+    // (`fg` shows the job's command once it has continued it.)
+    session.send_line("fg")?;
+    session.expect("exec head -n 2")?;
+    session.send("zebra\napple\n")?;
+    session
+        .expect(expectrl::Regex("apple\\s+zebra"))
+        .context("sorted input after resuming the pipeline")?;
+    session.expect_prompt()?;
+
+    session.exit()?;
+
+    Ok(())
+}
+
 #[test_with::executable(less)]
 #[test]
 fn run_pipeline_interactively() -> anyhow::Result<()> {
