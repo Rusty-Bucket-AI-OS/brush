@@ -2,6 +2,7 @@
 //! child processes) is required; see `rbproc`.
 
 pub mod async_pipe;
+pub(crate) mod background;
 pub use crate::sys::stubs::commands;
 pub(crate) mod env;
 pub use crate::sys::stubs::fd;

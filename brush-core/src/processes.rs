@@ -1,5 +1,6 @@
 //! Process management
 
+#[cfg(not(target_family = "wasm"))]
 use futures::FutureExt;
 
 use crate::{error, sys};
@@ -17,6 +18,9 @@ pub struct ChildProcess {
     pid: Option<sys::process::ProcessId>,
     /// If available, the process group ID of the child.
     pgid: Option<sys::process::ProcessId>,
+    /// On WASI: the child to ask the host about, when asking is enough to learn how it ended.
+    #[cfg(target_family = "wasm")]
+    pollable_pid: Option<u32>,
 }
 
 impl ChildProcess {
@@ -26,16 +30,26 @@ impl ChildProcess {
         pid: Option<sys::process::ProcessId>,
         pgid: Option<sys::process::ProcessId>,
     ) -> Self {
+        #[cfg(target_family = "wasm")]
+        let pollable_pid = child.id().filter(|_| child.is_pollable());
         Self {
             exec_future: Box::pin(child.wait_with_output()),
             pid,
             pgid,
+            #[cfg(target_family = "wasm")]
+            pollable_pid,
         }
     }
 
     /// Returns the process's ID.
     pub const fn pid(&self) -> Option<sys::process::ProcessId> {
         self.pid
+    }
+
+    /// On WASI: whether the host can be asked how the process ended without waiting for it.
+    #[cfg(target_family = "wasm")]
+    pub const fn is_pollable(&self) -> bool {
+        self.pollable_pid.is_some()
     }
 
     /// Returns the process's group ID.
@@ -73,6 +87,14 @@ impl ChildProcess {
         }
     }
 
+    // On WASI, waiting for a child blocks this program, so a poll asks the host without waiting
+    // (a child whose streams still wait to be carried is only done once it is waited for).
+    #[cfg(target_family = "wasm")]
+    pub(crate) fn poll(&mut self) -> Option<Result<sys::process::Output, error::Error>> {
+        sys::process::poll_child(self.pollable_pid?).map(|r| r.map_err(Into::into))
+    }
+
+    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn poll(&mut self) -> Option<Result<sys::process::Output, error::Error>> {
         let checkable_future = &mut self.exec_future;
         checkable_future

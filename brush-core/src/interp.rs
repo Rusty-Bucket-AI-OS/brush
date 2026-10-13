@@ -248,8 +248,21 @@ impl Execute for ast::CompoundList {
             let run_async = matches!(sep, ast::SeparatorOperator::Async);
 
             if run_async {
-                let job = spawn_async_ao_list_in_task(ao_list, shell, params);
-                let job_formatted = job.to_pid_style_string();
+                #[cfg(target_family = "wasm")]
+                let job_formatted = match spawn_async_ao_list_in_child(ao_list, shell, params).await
+                {
+                    Ok(formatted) => formatted,
+                    Err(err) => {
+                        // The job did not start; say why and go on, as bash does for a failed fork.
+                        let _ = shell.display_error(&mut params.stderr(shell), &err);
+                        result = ExecutionResult::general_error();
+                        shell.set_last_exit_status(result.exit_code.into());
+                        continue;
+                    }
+                };
+                #[cfg(not(target_family = "wasm"))]
+                let job_formatted =
+                    spawn_async_ao_list_in_task(ao_list, shell, params).to_pid_style_string();
 
                 if shell.options().interactive && !shell.is_subshell() {
                     writeln!(params.stderr(shell), "{job_formatted}")?;
@@ -272,6 +285,30 @@ impl Execute for ast::CompoundList {
     }
 }
 
+// On WASI there is one thread and no `fork`: a background job is a child shell process, started
+// through the host with the command's text (see `sys::wasm::background`). It runs beside this
+// shell, and `jobs`, `wait`, `$!` and `kill` see it as a job.
+#[cfg(target_family = "wasm")]
+async fn spawn_async_ao_list_in_child<SE: extensions::ShellExtensions>(
+    ao_list: &ast::AndOrList,
+    shell: &mut Shell<SE>,
+    params: &ExecutionParameters,
+) -> Result<String, error::Error> {
+    shell
+        .jobs_mut()
+        .wait_for_slot(sys::background::MAX_RUNNING_JOBS)
+        .await?;
+    let text = ao_list.to_string();
+    let child = sys::background::spawn_background(shell, params, &text)?;
+    let job = shell.jobs_mut().add_as_current(jobs::Job::new(
+        [jobs::JobTask::External(child)],
+        text,
+        jobs::JobState::Running,
+    ));
+    Ok(job.to_pid_style_string())
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn spawn_async_ao_list_in_task<'a, SE: extensions::ShellExtensions>(
     ao_list: &ast::AndOrList,
     shell: &'a mut Shell<SE>,

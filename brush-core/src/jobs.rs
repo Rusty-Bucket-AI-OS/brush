@@ -20,7 +20,14 @@ pub(crate) type JobResult = (Job, Result<ExecutionResult, error::Error>);
 pub struct JobManager {
     /// The jobs that are currently managed by the shell.
     pub jobs: Vec<Job>,
+
+    /// How the most recent jobs that left the table ended, by process ID (so `wait PID` still
+    /// reports a job that was already cleared away, as bash does).
+    ended: VecDeque<(sys::process::ProcessId, crate::results::ExecutionExitCode)>,
 }
+
+/// How many ended jobs the manager remembers.
+const MAX_REMEMBERED_ENDED_JOBS: usize = 64;
 
 /// Represents a task that is part of a job.
 pub enum JobTask {
@@ -42,6 +49,15 @@ impl JobTask {
     /// Returns whether the task is an external process.
     pub const fn is_external(&self) -> bool {
         matches!(self, Self::External(_))
+    }
+
+    /// Whether the host can be asked how the task ended without waiting for it.
+    #[cfg(target_family = "wasm")]
+    pub const fn is_pollable(&self) -> bool {
+        match self {
+            Self::External(process) => process.is_pollable(),
+            Self::Internal(_) => true,
+        }
     }
 
     /// Waits for the task to complete. Returns the result of the wait.
@@ -170,6 +186,41 @@ impl JobManager {
         Ok(self.sweep_completed_jobs())
     }
 
+    /// Notes the jobs that have ended, keeping them in the table (so `wait` can still report how
+    /// they ended).
+    #[cfg(target_family = "wasm")]
+    pub fn reap_finished(&mut self) {
+        for job in &mut self.jobs {
+            let _ = job.poll_done();
+        }
+    }
+
+    /// Returns how many jobs are still running.
+    #[cfg(target_family = "wasm")]
+    pub fn running_count(&mut self) -> usize {
+        self.reap_finished();
+        self.jobs.iter().filter(|j| !j.tasks.is_empty()).count()
+    }
+
+    /// Waits until fewer than `limit` jobs are running. A job whose streams the shell has to carry
+    /// is waited for (that is what carries them); the others are asked after every few
+    /// milliseconds.
+    #[cfg(target_family = "wasm")]
+    pub async fn wait_for_slot(&mut self, limit: usize) -> Result<(), error::Error> {
+        while self.running_count() >= limit {
+            if let Some(job) = self
+                .jobs
+                .iter_mut()
+                .find(|j| j.tasks.iter().any(|t| !t.is_pollable()))
+            {
+                job.wait().await?;
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        Ok(())
+    }
+
     /// Polls all managed jobs for completion.
     pub fn poll(&mut self) -> Result<Vec<JobResult>, error::Error> {
         let mut results = vec![];
@@ -178,11 +229,14 @@ impl JobManager {
         while i != self.jobs.len() {
             if let Some(result) = self.jobs[i].poll_done()? {
                 let job = self.jobs.remove(i);
+                self.remember_ended(&job);
                 results.push((job, result));
             } else if matches!(self.jobs[i].state, JobState::Done) {
                 // TODO(jobs): This is a workaround to remove jobs that are done but for which we
                 // don't know what happened.
-                results.push((self.jobs.remove(i), Ok(ExecutionResult::success())));
+                let job = self.jobs.remove(i);
+                self.remember_ended(&job);
+                results.push((job, Ok(ExecutionResult::success())));
             } else {
                 i += 1;
             }
@@ -197,13 +251,36 @@ impl JobManager {
         let mut i = 0;
         while i != self.jobs.len() {
             if self.jobs[i].tasks.is_empty() {
-                completed_jobs.push(self.jobs.remove(i));
+                let job = self.jobs.remove(i);
+                self.remember_ended(&job);
+                completed_jobs.push(job);
             } else {
                 i += 1;
             }
         }
 
         completed_jobs
+    }
+
+    fn remember_ended(&mut self, job: &Job) {
+        if let (Some(pid), Some(code)) = (job.known_pid, job.exit_code) {
+            self.ended.retain(|(p, _)| *p != pid);
+            if self.ended.len() == MAX_REMEMBERED_ENDED_JOBS {
+                self.ended.pop_front();
+            }
+            self.ended.push_back((pid, code));
+        }
+    }
+
+    /// How a job that has left the table ended, found by its process ID.
+    pub fn ended_status(&self, pid: sys::process::ProcessId) -> Option<ExecutionResult> {
+        self.ended
+            .iter()
+            .find(|(p, _)| *p == pid)
+            .map(|(_, exit_code)| ExecutionResult {
+                exit_code: *exit_code,
+                ..ExecutionResult::default()
+            })
     }
 }
 
@@ -271,6 +348,16 @@ pub struct Job {
 
     /// The current operational state of the job.
     pub state: JobState,
+
+    /// The pid the job's first process had.
+    known_pid: Option<sys::process::ProcessId>,
+
+    /// How the job ended, once it has (kept so that `wait` can report it later).
+    exit_code: Option<crate::results::ExecutionExitCode>,
+
+    /// The status the job reports when it was ended by `kill` (128 plus the signal's number).
+    #[cfg(target_family = "wasm")]
+    killed_as: Option<u8>,
 }
 
 impl Display for Job {
@@ -298,14 +385,21 @@ impl Job {
     where
         I: IntoIterator<Item = JobTask>,
     {
-        Self {
+        let tasks: VecDeque<JobTask> = tasks.into_iter().collect();
+        let mut job = Self {
             id: 0,
-            tasks: tasks.into_iter().collect(),
+            tasks,
             pgid: None,
             annotation: JobAnnotation::None,
             command_line,
             state,
-        }
+            known_pid: None,
+            exit_code: None,
+            #[cfg(target_family = "wasm")]
+            killed_as: None,
+        };
+        job.known_pid = job.representative_pid();
+        job
     }
 
     /// Returns a pid-style string for the job.
@@ -363,14 +457,46 @@ impl Job {
         tracing::debug!(target: trace_categories::JOBS, "Job {} has completed.", self.id);
 
         self.state = JobState::Done;
+        if let Some(Ok(finished)) = &result {
+            self.exit_code = Some(self.reported(finished.exit_code));
+        }
 
         Ok(result)
     }
 
+    /// The exit code to report for a job that ended with `code`.
+    #[cfg(target_family = "wasm")]
+    fn reported(
+        &self,
+        code: crate::results::ExecutionExitCode,
+    ) -> crate::results::ExecutionExitCode {
+        // A job ended by `kill` reports the signal that was sent, as bash does.
+        match self.killed_as {
+            Some(status) if u8::from(code) == 137 => status.into(),
+            _ => code,
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn reported(
+        &self,
+        code: crate::results::ExecutionExitCode,
+    ) -> crate::results::ExecutionExitCode {
+        code
+    }
+
     /// Waits for the job to complete.
     pub async fn wait(&mut self) -> Result<ExecutionResult, error::Error> {
+        // A job that has ended and been reaped already reports how it ended.
+        if self.tasks.is_empty() {
+            if let Some(exit_code) = self.exit_code {
+                return Ok(ExecutionResult {
+                    exit_code,
+                    ..ExecutionResult::default()
+                });
+            }
+        }
         let mut result = ExecutionResult::success();
-
         while let Some(task) = self.tasks.back_mut() {
             match task.wait().await? {
                 JobTaskWaitResult::Completed(execution_result) => {
@@ -385,6 +511,8 @@ impl Job {
         }
 
         self.state = JobState::Done;
+        result.exit_code = self.reported(result.exit_code);
+        self.exit_code = Some(result.exit_code);
 
         Ok(result)
     }
@@ -435,6 +563,32 @@ impl Job {
         }
     }
 
+    /// Ends the job's processes (WASI has no signals: any of them ends the job). The job then
+    /// reports `128 + signal`, the status bash gives for a job ended by that signal.
+    #[cfg(target_family = "wasm")]
+    pub fn terminate(&mut self, signal: u8) -> Result<(), error::Error> {
+        self.reap_if_ended();
+        if self.tasks.is_empty() {
+            return Err(error::ErrorKind::FailedToSendSignal.into());
+        }
+        for task in &self.tasks {
+            if let JobTask::External(p) = task
+                && let Some(pid) = p.pid()
+            {
+                #[expect(clippy::cast_sign_loss)]
+                sys::process::kill_child(pid as u32)
+                    .map_err(|_| error::Error::from(error::ErrorKind::FailedToSendSignal))?;
+            }
+        }
+        self.killed_as = Some(128 + signal);
+        Ok(())
+    }
+
+    #[cfg(target_family = "wasm")]
+    fn reap_if_ended(&mut self) {
+        let _ = self.poll_done();
+    }
+
     /// Tries to retrieve a "representative" pid for the job.
     pub fn representative_pid(&self) -> Option<sys::process::ProcessId> {
         for task in &self.tasks {
@@ -447,12 +601,16 @@ impl Job {
                 JobTask::Internal(_) => (),
             }
         }
-        None
+        // (A job that has ended keeps the pid it had: `$!` and `wait PID` still use it.)
+        self.known_pid
     }
 
     /// Tries to retrieve the process group ID (PGID) of the job.
     pub fn process_group_id(&self) -> Option<sys::process::ProcessId> {
         // TODO(jobs): Don't assume that the first PID is the PGID.
+        if self.tasks.is_empty() {
+            return self.pgid;
+        }
         self.pgid.or_else(|| self.representative_pid())
     }
 }

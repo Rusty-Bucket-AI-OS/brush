@@ -18,7 +18,7 @@ use super::process::Child;
 use super::rbproc::{self, NO_FD};
 
 /// What the shell keeps of a standard stream it pumps.
-enum Pump {
+pub(super) enum Pump {
     /// The child reads what this file gives; the pipe end is ours to write.
     Input(OpenFile, PipeWriter),
     /// The child writes the other end; ours is read into this file.
@@ -26,7 +26,7 @@ enum Pump {
 }
 
 /// Which descriptor of ours the child gets as a standard stream, and what must be pumped.
-fn connect(
+pub(super) fn connect(
     file: Option<OpenFile>,
     slot: u32,
     pumps: &mut Vec<Pump>,
@@ -57,7 +57,7 @@ fn connect(
 }
 
 /// Runs the pumps to their ends (input first, then output).
-fn run_pumps(pumps: Vec<Pump>) {
+pub(super) fn run_pumps(pumps: Vec<Pump>) {
     let (inputs, outputs): (Vec<_>, Vec<_>) = pumps
         .into_iter()
         .partition(|p| matches!(p, Pump::Input(..)));
@@ -80,7 +80,7 @@ fn run_pumps(pumps: Vec<Pump>) {
     }
 }
 
-fn absolute(path: &str, cwd: &std::path::Path) -> String {
+pub(super) fn absolute(path: &str, cwd: &std::path::Path) -> String {
     if path.starts_with('/') {
         path.to_owned()
     } else {
@@ -88,7 +88,7 @@ fn absolute(path: &str, cwd: &std::path::Path) -> String {
     }
 }
 
-fn exported_env<SE: extensions::ShellExtensions>(
+pub(super) fn exported_env<SE: extensions::ShellExtensions>(
     context: &ExecutionContext<'_, SE>,
     program: &str,
 ) -> Vec<(String, String)> {

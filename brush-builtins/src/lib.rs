@@ -62,6 +62,9 @@ mod history;
 mod jobs;
 #[cfg(all(feature = "builtin.kill", unix))]
 mod kill;
+#[cfg(all(feature = "builtin.kill", target_family = "wasm"))]
+#[path = "kill_wasm.rs"]
+mod kill;
 #[cfg(feature = "builtin.let")]
 mod let_;
 #[cfg(feature = "builtin.mapfile")]

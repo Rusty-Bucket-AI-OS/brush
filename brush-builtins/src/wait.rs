@@ -47,7 +47,7 @@ impl builtins::Command for WaitCommand {
                 if id.starts_with('%') {
                     // It's a job spec.
                     if let Some(job) = context.shell.jobs_mut().resolve_job_spec(id) {
-                        job.wait().await?;
+                        result = job.wait().await?;
                     } else {
                         writeln!(
                             context.stderr(),
@@ -56,11 +56,31 @@ impl builtins::Command for WaitCommand {
                             id
                         )?;
 
-                        result = ExecutionExitCode::GeneralError.into();
+                        result = ExecutionExitCode::NotFound.into();
                     }
                 } else {
-                    // It's a process ID.
-                    return error::unimp("wait with process IDs");
+                    // It's a process ID: one of the shell's own background jobs.
+                    let pid = id.parse::<i32>().ok();
+                    let jobs = context.shell.jobs_mut();
+                    let ended = pid.and_then(|p| jobs.ended_status(p));
+                    let job = jobs
+                        .jobs
+                        .iter_mut()
+                        .find(|j| pid.is_some() && j.representative_pid() == pid);
+                    if let Some(job) = job {
+                        result = job.wait().await?;
+                    } else if let Some(ended) = ended {
+                        result = ended;
+                    } else {
+                        writeln!(
+                            context.stderr(),
+                            "{}: pid {} is not a child of this shell",
+                            context.command_name,
+                            id
+                        )?;
+
+                        result = ExecutionExitCode::NotFound.into();
+                    }
                 }
             }
         } else {

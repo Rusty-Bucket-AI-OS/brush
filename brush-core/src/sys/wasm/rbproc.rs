@@ -13,6 +13,8 @@ unsafe extern "C" {
     fn host_spawn(request: *const u8, len: u32, pid: *mut u32) -> u32;
     #[link_name = "wait"]
     fn host_wait(pid: u32, flags: u32, out: *mut u32) -> u32;
+    #[link_name = "kill"]
+    fn host_kill(pid: u32) -> u32;
 }
 
 /// The "no descriptor" value of a child's standard stream slot: the child gets a closed stream.
@@ -21,6 +23,8 @@ pub(crate) const NO_FD: u32 = u32::MAX;
 const FLAG_SIGPIPE_TERMINATES: u32 = 1;
 /// The WASI errno for "no such file or directory".
 pub(crate) const ENOENT: u32 = 44;
+/// The WASI errno for "try again": a child that is still running, asked without waiting.
+const EAGAIN: u32 = 6;
 
 /// The most arguments or variables in one request, and the longest single string (the host's
 /// limits).
@@ -123,6 +127,27 @@ pub(crate) fn wait(pid: u32) -> std::io::Result<i32> {
         return Err(errno_error(errno));
     }
     Ok(out[0] as i32)
+}
+
+/// Asks about the child without waiting: its exit code if it has ended, `None` while it runs.
+pub(crate) fn try_wait(pid: u32) -> std::io::Result<Option<i32>> {
+    let mut out = [0u32; 2];
+    // SAFETY: as for `wait`; flag 1 is the host's `WNOHANG`.
+    let errno = unsafe { host_wait(pid, 1, out.as_mut_ptr()) };
+    match errno {
+        0 => Ok(Some(out[0] as i32)),
+        EAGAIN => Ok(None),
+        _ => Err(errno_error(errno)),
+    }
+}
+
+/// Ends a child.
+pub(crate) fn kill(pid: u32) -> std::io::Result<()> {
+    // SAFETY: the call takes a number and touches no memory of this program.
+    match unsafe { host_kill(pid) } {
+        0 => Ok(()),
+        errno => Err(errno_error(errno)),
+    }
 }
 
 /// The descriptor number of an owned stream file.

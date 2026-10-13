@@ -17,7 +17,7 @@ pub(crate) mod wasm;
 #[cfg(target_family = "wasm")]
 pub(crate) use wasm as platform;
 #[cfg(target_family = "wasm")]
-pub(crate) use wasm::{memfile, spawn};
+pub(crate) use wasm::{background, memfile, spawn};
 
 #[cfg(not(unix))]
 pub(crate) mod stubs;
