@@ -17,6 +17,8 @@ unsafe extern "C" {
 
 /// The "no descriptor" value of a child's standard stream slot: the child gets a closed stream.
 pub(crate) const NO_FD: u32 = u32::MAX;
+/// Request flag: a write to a pipe nobody reads ends the child (like SIGPIPE) instead of failing.
+const FLAG_SIGPIPE_TERMINATES: u32 = 1;
 /// The WASI errno for "no such file or directory".
 pub(crate) const ENOENT: u32 = 44;
 
@@ -80,7 +82,8 @@ fn encode(request: &Request<'_>) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
     for word in [
         1u32,
-        0,
+        // The flag: a write to a pipe nobody reads ends the child, as SIGPIPE does (`yes | head`).
+        FLAG_SIGPIPE_TERMINATES,
         request.stdio[0],
         request.stdio[1],
         request.stdio[2],
