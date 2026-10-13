@@ -10,6 +10,7 @@ use std::{
 
 use brush_parser::ast;
 use itertools::Itertools;
+#[cfg_attr(target_family = "wasm", allow(unused_imports))]
 use sys::commands::{CommandExt, CommandFdInjectionExt, CommandFgControlExt};
 
 use crate::{
@@ -21,7 +22,7 @@ use crate::{
     openfiles::{self, OpenFile, OpenFiles},
     pathsearch, processes,
     results::ExecutionSpawnResult,
-    sys, trace_categories, traps, variables,
+    sys, traps, variables,
 };
 
 /// Encapsulates the result of waiting for a command to complete.
@@ -400,6 +401,11 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 
             if let Some(path) = path {
                 self.execute_via_external(&path)
+            } else if cfg!(target_family = "wasm") {
+                // The host keeps its own commands (the core utilities); ask it by name. A name it
+                // does not know comes back as "command not found".
+                let name = PathBuf::from(self.command_name.clone());
+                self.execute_via_external(name.as_path())
             } else {
                 // Bash updates $_ even when the command is not found, so mirror
                 // that here before reporting the error.
@@ -430,13 +436,16 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
     ) -> Result<ExecutionSpawnResult, error::Error> {
         match self.shell {
             ShellForCommand::OwnedShell { target, .. } => {
-                Ok(Self::execute_via_builtin_in_owned_shell(
+                let started = Self::execute_via_builtin_in_owned_shell(
                     *target,
                     self.params,
                     builtin,
                     self.command_name,
                     self.args,
-                ))
+                );
+                #[cfg(target_family = "wasm")]
+                let started = started.await?;
+                Ok(started)
             }
             ShellForCommand::ParentShell(..) => {
                 self.execute_via_builtin_in_parent_shell(builtin).await
@@ -444,6 +453,28 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
         }
     }
 
+    // On WASI there are no threads to run a builtin on: the stage runs now, to its end (its output
+    // waits in the pipe, whose reader starts afterward or is another program that runs already).
+    #[cfg(target_family = "wasm")]
+    async fn execute_via_builtin_in_owned_shell(
+        mut shell: Shell<SE>,
+        params: ExecutionParameters,
+        builtin: builtins::Registration<SE>,
+        command_name: String,
+        args: Vec<CommandArg>,
+    ) -> Result<ExecutionSpawnResult, error::Error> {
+        let last_arg = Self::take_last_arg(&args);
+        let cmd_context = ExecutionContext {
+            shell: &mut shell,
+            command_name,
+            params,
+        };
+        let result = execute_builtin_command(&builtin, cmd_context, args).await;
+        shell.update_last_arg_variable(last_arg);
+        Ok(result?.into())
+    }
+
+    #[cfg(not(target_family = "wasm"))]
     fn execute_via_builtin_in_owned_shell(
         mut shell: Shell<SE>,
         params: ExecutionParameters,
@@ -557,6 +588,10 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
     }
 }
 
+#[cfg(target_family = "wasm")]
+pub(crate) use sys::spawn::execute_external_command;
+
+#[cfg(not(target_family = "wasm"))]
 pub(crate) fn execute_external_command(
     context: ExecutionContext<'_, impl extensions::ShellExtensions>,
     executable_path: &str,
@@ -622,7 +657,7 @@ pub(crate) fn execute_external_command(
 
     // When tracing is enabled, report.
     tracing::debug!(
-        target: trace_categories::COMMANDS,
+        target: crate::trace_categories::COMMANDS,
         "Spawning: cmd='{} {}'",
         cmd.get_program().to_string_lossy().to_string(),
         cmd.get_args()
@@ -768,22 +803,36 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
     let mut params = params.clone();
     params.process_group_policy = ProcessGroupPolicy::SameProcessGroup;
 
-    // Set up pipe so we can read the output.
-    let (reader, writer) = std::io::pipe()?;
-    params.set_fd(OpenFiles::STDOUT_FD, writer.into());
+    // On WASI there is one thread: the command runs here, to its end, into a buffer.
+    #[cfg(target_family = "wasm")]
+    let output_str = {
+        let (sink_file, sink) = sys::memfile::memory_sink();
+        params.set_fd(OpenFiles::STDOUT_FD, sink_file);
+        let cmd_result = run_substitution_command(subshell, params, s).await?;
+        shell.set_last_exit_status(cmd_result.exit_code.into());
+        String::from_utf8_lossy(&sink.take()).into_owned()
+    };
 
-    let mut async_reader = sys::async_pipe::AsyncPipeReader::new(reader)?;
+    #[cfg(not(target_family = "wasm"))]
+    let output_str = {
+        // Set up pipe so we can read the output.
+        let (reader, writer) = sys::pipes::pipe()?;
+        params.set_fd(OpenFiles::STDOUT_FD, writer.into());
 
-    let cmd_join_handle = tokio::spawn(run_substitution_command(subshell, params, s));
+        let mut async_reader = sys::async_pipe::AsyncPipeReader::new(reader)?;
 
-    let output_str = async_reader.read_to_string().await?;
+        let cmd_join_handle = tokio::spawn(run_substitution_command(subshell, params, s));
 
-    // Now observe the command's completion.
-    let run_result = cmd_join_handle.await?;
-    let cmd_result = run_result?;
+        let output_str = async_reader.read_to_string().await?;
 
-    // Store the status.
-    shell.set_last_exit_status(cmd_result.exit_code.into());
+        // Now observe the command's completion.
+        let run_result = cmd_join_handle.await?;
+        let cmd_result = run_result?;
+
+        // Store the status.
+        shell.set_last_exit_status(cmd_result.exit_code.into());
+        output_str
+    };
 
     // Note: $_ is naturally isolated from the parent because we cloned the
     // shell to run the substitution.

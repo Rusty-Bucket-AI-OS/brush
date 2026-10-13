@@ -1,15 +1,21 @@
-pub use crate::sys::stubs::async_pipe;
+//! WebAssembly (WASI) platform support. A host that provides the module `rb_proc` (pipes and
+//! child processes) is required; see `rbproc`.
+
+pub mod async_pipe;
 pub use crate::sys::stubs::commands;
-pub(crate) use crate::sys::stubs::env;
+pub(crate) mod env;
 pub use crate::sys::stubs::fd;
 pub(crate) mod fs;
 pub use crate::sys::stubs::input;
 pub(crate) use crate::sys::stubs::network;
-pub(crate) use crate::sys::stubs::pipes;
+pub(crate) mod memfile;
+pub(crate) mod pipes;
 pub use crate::sys::stubs::poll;
-pub use crate::sys::stubs::process;
+pub mod process;
+pub(crate) mod rbproc;
 pub use crate::sys::stubs::resource;
 pub use crate::sys::stubs::signal;
+pub(crate) mod spawn;
 pub use crate::sys::stubs::terminal;
 pub(crate) use crate::sys::stubs::users;
 

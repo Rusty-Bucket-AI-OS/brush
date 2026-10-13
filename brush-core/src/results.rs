@@ -3,7 +3,7 @@
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 
-use crate::{error, processes};
+use crate::{error, processes, sys};
 
 /// Represents the result of executing a command or similar item.
 #[derive(Default)]
@@ -109,8 +109,8 @@ impl From<ExecutionWaitResult> for ExecutionResult {
     }
 }
 
-impl From<std::process::Output> for ExecutionResult {
-    fn from(output: std::process::Output) -> Self {
+impl From<sys::process::Output> for ExecutionResult {
+    fn from(output: sys::process::Output) -> Self {
         if let Some(code) = output.status.code() {
             #[expect(clippy::cast_sign_loss)]
             return Self::new((code & 0xFF) as u8);

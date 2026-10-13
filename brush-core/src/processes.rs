@@ -6,7 +6,7 @@ use crate::{error, sys};
 
 /// A waitable future that will yield the results of a child process's execution.
 pub(crate) type WaitableChildProcess = std::pin::Pin<
-    Box<dyn futures::Future<Output = Result<std::process::Output, std::io::Error>> + Send + Sync>,
+    Box<dyn futures::Future<Output = Result<sys::process::Output, std::io::Error>> + Send + Sync>,
 >;
 
 /// Tracks a child process being awaited.
@@ -73,7 +73,7 @@ impl ChildProcess {
         }
     }
 
-    pub(crate) fn poll(&mut self) -> Option<Result<std::process::Output, error::Error>> {
+    pub(crate) fn poll(&mut self) -> Option<Result<sys::process::Output, error::Error>> {
         let checkable_future = &mut self.exec_future;
         checkable_future
             .now_or_never()
@@ -84,7 +84,7 @@ impl ChildProcess {
 /// Represents the result of waiting for an executing process.
 pub enum ProcessWaitResult {
     /// The process completed.
-    Completed(std::process::Output),
+    Completed(sys::process::Output),
     /// The process stopped and has not yet completed.
     Stopped,
 }

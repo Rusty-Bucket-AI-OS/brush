@@ -143,6 +143,7 @@ tracing = "0.1.44"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 tokio = { version = "1.52.1", features = ["io-util", "macros", "rt"] }
+uucore = { version = "0.8.0", default-features = false, features = ["format"] }
 
 [target.'cfg(any(unix, windows))'.dependencies]
 tokio = { version = "1.50.0", features = [

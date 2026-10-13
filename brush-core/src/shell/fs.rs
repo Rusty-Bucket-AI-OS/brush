@@ -193,6 +193,12 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
             return result.map(openfiles::OpenFile::from);
         }
 
+        // WASI has no device files: the null device is made here.
+        #[cfg(target_family = "wasm")]
+        if path.as_ref() == Path::new("/dev/null") {
+            return Ok(crate::sys::memfile::null_file());
+        }
+
         let path_to_open = self.absolute_path(path.as_ref());
 
         // See if this is a reference to a file descriptor, in which case the actual

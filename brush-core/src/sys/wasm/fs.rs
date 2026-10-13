@@ -2,6 +2,22 @@
 
 pub use crate::sys::stubs::fs::*;
 
+/// The folders commands are looked for in when `PATH` is not set.
+pub(crate) fn get_default_executable_search_paths() -> Vec<std::path::PathBuf> {
+    vec!["/usr/bin".into(), "/bin".into()]
+}
+
+/// Whether `path` names a command the host keeps (the core utilities are programs of the host, not
+/// files): a name in `/usr/bin` or `/bin` that is in the list of the variable `RB_COMMANDS`, which
+/// the host starts the shell with (space-separated).
+fn is_host_command(path: &std::path::Path) -> bool {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+        return false;
+    };
+    (dir == std::path::Path::new("/usr/bin") || dir == std::path::Path::new("/bin"))
+        && std::env::var("RB_COMMANDS").is_ok_and(|list| list.split_whitespace().any(|c| c == name))
+}
+
 impl crate::sys::fs::PathExt for std::path::Path {
     fn readable(&self) -> bool {
         true
@@ -12,7 +28,7 @@ impl crate::sys::fs::PathExt for std::path::Path {
     }
 
     fn executable(&self) -> bool {
-        true
+        self.is_file() || is_host_command(self)
     }
 
     fn exists_and_is_block_device(&self) -> bool {

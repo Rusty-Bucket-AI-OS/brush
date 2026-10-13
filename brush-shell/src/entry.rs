@@ -202,11 +202,21 @@ fn install_panic_handlers() {
     // Set up panic handler. On release builds, it will capture panic details to a
     // temporary .toml file and report a human-readable message to the screen.
     //
+    #[cfg(not(target_family = "wasm"))]
     human_panic::setup_panic!(
         human_panic::Metadata::new(productinfo::PRODUCT_NAME, productinfo::PRODUCT_VERSION)
             .homepage(env!("CARGO_PKG_HOMEPAGE"))
             .support("please post a GitHub issue at https://github.com/reubeno/brush/issues/new")
     );
+
+    // On WASI there is no temporary folder to write a report to: say what happened and stop.
+    #[cfg(target_family = "wasm")]
+    std::panic::set_hook(Box::new(|panic_info| {
+        eprintln!(
+            "{}: internal error: {panic_info}",
+            productinfo::PRODUCT_NAME
+        );
+    }));
 
     //
     // If stdout is connected to a terminal, then register a new panic handler that
@@ -616,9 +626,11 @@ fn enable_xtrace_to_file(
     Ok(())
 }
 
-const fn new_error_behavior(args: &CommandLineArgs) -> error_formatter::Formatter {
+fn new_error_behavior(args: &CommandLineArgs) -> error_formatter::Formatter {
     error_formatter::Formatter {
-        use_color: !args.disable_color,
+        // (On WASI the color goes to a terminal only: a pipe or a file gets plain text.)
+        use_color: !args.disable_color
+            && (cfg!(not(target_family = "wasm")) || std::io::stderr().is_terminal()),
     }
 }
 

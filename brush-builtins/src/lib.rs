@@ -38,7 +38,7 @@ mod echo;
 mod enable;
 #[cfg(feature = "builtin.eval")]
 mod eval;
-#[cfg(all(feature = "builtin.exec", unix))]
+#[cfg(all(feature = "builtin.exec", any(unix, target_family = "wasm")))]
 mod exec;
 #[cfg(feature = "builtin.exit")]
 mod exit;
@@ -68,7 +68,7 @@ mod let_;
 mod mapfile;
 #[cfg(feature = "builtin.popd")]
 mod popd;
-#[cfg(all(feature = "builtin.printf", any(unix, windows)))]
+#[cfg(all(feature = "builtin.printf", any(unix, windows, target_family = "wasm")))]
 mod printf;
 #[cfg(feature = "builtin.pushd")]
 mod pushd;

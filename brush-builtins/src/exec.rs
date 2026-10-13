@@ -1,7 +1,6 @@
 use clap::Parser;
-use std::{borrow::Cow, os::unix::process::CommandExt};
 
-use brush_core::{ErrorKind, ExecutionExitCode, ExecutionResult, builtins, commands};
+use brush_core::{ExecutionResult, builtins};
 
 /// Exec the provided command.
 #[derive(Parser)]
@@ -57,6 +56,42 @@ impl builtins::Command for ExecCommand {
 
             return cmd_cmd.execute(context).await;
         }
+
+        self.replace_shell(context).await
+    }
+}
+
+impl ExecCommand {
+    /// There is no `exec` on WASI: runs the command, then ends the shell with its status.
+    #[cfg(target_family = "wasm")]
+    async fn replace_shell<SE: brush_core::ShellExtensions>(
+        &self,
+        context: brush_core::ExecutionContext<'_, SE>,
+    ) -> Result<ExecutionResult, brush_core::Error> {
+        use brush_core::builtins::Command as _;
+
+        if self.empty_environment || self.exec_as_login || self.name_for_argv0.is_some() {
+            return brush_core::error::unimp("exec with options is not supported here");
+        }
+        let cmd_cmd = crate::command::CommandCommand {
+            command_and_args: self.args.clone(),
+            ..Default::default()
+        };
+        let mut result = cmd_cmd.execute(context).await?;
+        result.next_control_flow = brush_core::ExecutionControlFlow::ExitShell;
+        Ok(result)
+    }
+
+    /// Replaces the shell's process with the command.
+    #[cfg(unix)]
+    async fn replace_shell<SE: brush_core::ShellExtensions>(
+        &self,
+        context: brush_core::ExecutionContext<'_, SE>,
+    ) -> Result<ExecutionResult, brush_core::Error> {
+        use std::borrow::Cow;
+        use std::os::unix::process::CommandExt;
+
+        use brush_core::{ErrorKind, ExecutionExitCode, commands};
 
         let mut argv0 = Cow::Borrowed(self.name_for_argv0.as_ref().unwrap_or(&self.args[0]));
 

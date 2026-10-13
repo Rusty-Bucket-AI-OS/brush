@@ -40,9 +40,9 @@ pub enum OpenFile {
     /// A file open for reading or writing.
     File(std::fs::File),
     /// A read end of a pipe.
-    PipeReader(std::io::PipeReader),
+    PipeReader(sys::pipes::PipeReader),
     /// A write end of a pipe.
-    PipeWriter(std::io::PipeWriter),
+    PipeWriter(sys::pipes::PipeWriter),
     /// A custom stream.
     Stream(Box<dyn Stream>),
 }
@@ -89,7 +89,11 @@ impl<'de> serde::Deserialize<'de> for OpenFile {
 
 /// Returns an open file that will discard all I/O.
 pub fn null() -> Result<OpenFile, error::Error> {
+    #[cfg(target_family = "wasm")]
+    return Ok(sys::memfile::null_file());
+    #[cfg(not(target_family = "wasm"))]
     let file = sys::fs::open_null_file()?;
+    #[cfg(not(target_family = "wasm"))]
     Ok(OpenFile::File(file))
 }
 
@@ -212,22 +216,35 @@ impl From<std::io::Stderr> for OpenFile {
 
 impl From<std::fs::File> for OpenFile {
     fn from(file: std::fs::File) -> Self {
+        // WASI has no `dup`: a file is shared between its clones instead.
+        #[cfg(target_family = "wasm")]
+        return sys::memfile::shared_file(file);
+        #[cfg(not(target_family = "wasm"))]
         Self::File(file)
     }
 }
 
-impl From<std::io::PipeReader> for OpenFile {
-    fn from(reader: std::io::PipeReader) -> Self {
+impl From<sys::pipes::PipeReader> for OpenFile {
+    fn from(reader: sys::pipes::PipeReader) -> Self {
         Self::PipeReader(reader)
     }
 }
 
-impl From<std::io::PipeWriter> for OpenFile {
-    fn from(writer: std::io::PipeWriter) -> Self {
+impl From<sys::pipes::PipeWriter> for OpenFile {
+    fn from(writer: sys::pipes::PipeWriter) -> Self {
         Self::PipeWriter(writer)
     }
 }
 
+/// (Not used on WASI, where children are started through `rb_proc`, not `std::process`.)
+#[cfg(target_family = "wasm")]
+impl From<OpenFile> for Stdio {
+    fn from(_open_file: OpenFile) -> Self {
+        Self::null()
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
 impl From<OpenFile> for Stdio {
     fn from(open_file: OpenFile) -> Self {
         match open_file {

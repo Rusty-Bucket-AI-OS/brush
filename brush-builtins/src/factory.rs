@@ -52,7 +52,7 @@ pub fn default_builtins<SE: brush_core::ShellExtensions>(
     m.insert(".".into(), builtin::<dot::DotCommand, SE>().special());
     #[cfg(feature = "builtin.eval")]
     m.insert("eval".into(), builtin::<eval::EvalCommand, SE>().special());
-    #[cfg(all(feature = "builtin.exec", unix))]
+    #[cfg(all(feature = "builtin.exec", any(unix, target_family = "wasm")))]
     m.insert("exec".into(), builtin::<exec::ExecCommand, SE>().special());
     #[cfg(feature = "builtin.exit")]
     m.insert("exit".into(), builtin::<exit::ExitCommand, SE>().special());
@@ -164,7 +164,7 @@ pub fn default_builtins<SE: brush_core::ShellExtensions>(
         m.insert("mapfile".into(), builtin::<mapfile::MapFileCommand, SE>());
         #[cfg(feature = "builtin.mapfile")]
         m.insert("readarray".into(), builtin::<mapfile::MapFileCommand, SE>());
-        #[cfg(all(feature = "builtin.printf", any(unix, windows)))]
+        #[cfg(all(feature = "builtin.printf", any(unix, windows, target_family = "wasm")))]
         m.insert("printf".into(), builtin::<printf::PrintfCommand, SE>());
         #[cfg(feature = "builtin.shopt")]
         m.insert("shopt".into(), builtin::<shopt::ShoptCommand, SE>());

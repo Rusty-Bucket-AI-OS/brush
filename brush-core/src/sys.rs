@@ -16,6 +16,8 @@ pub(crate) use windows as platform;
 pub(crate) mod wasm;
 #[cfg(target_family = "wasm")]
 pub(crate) use wasm as platform;
+#[cfg(target_family = "wasm")]
+pub(crate) use wasm::{memfile, spawn};
 
 #[cfg(not(unix))]
 pub(crate) mod stubs;
@@ -26,6 +28,14 @@ pub(crate) mod hostname;
 pub mod tokio_process;
 
 pub mod fs;
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) mod pipes {
+    //! Pipes (the standard library's, where it has them).
+    pub use std::io::{PipeReader, PipeWriter, pipe};
+}
+#[cfg(target_family = "wasm")]
+pub(crate) use wasm::pipes;
 
 pub use platform::async_pipe;
 pub use platform::commands;
@@ -41,3 +51,20 @@ pub use platform::terminal;
 pub(crate) use platform::users;
 
 pub use platform::PlatformError;
+
+/// The shell's own process ID. WASI has none: a number from the clock stands in for it, so
+/// that names built from `$$` differ between runs.
+pub(crate) fn current_pid() -> u32 {
+    #[cfg(target_family = "wasm")]
+    {
+        static PID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        *PID.get_or_init(|| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(1, |d| d.subsec_nanos());
+            2 + nanos % 30_000
+        })
+    }
+    #[cfg(not(target_family = "wasm"))]
+    std::process::id()
+}

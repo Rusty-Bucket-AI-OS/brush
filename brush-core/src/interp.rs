@@ -457,7 +457,7 @@ async fn spawn_pipeline_processes(
     // command.
     if pipeline_len > 1 {
         for _ in 0..(pipeline_len - 1) {
-            let (reader, writer) = std::io::pipe()?;
+            let (reader, writer) = sys::pipes::pipe()?;
             pipe_readers.push(Some(reader.into()));
             pipe_writers.push(Some(writer.into()));
         }
@@ -737,9 +737,14 @@ impl Execute for ast::CoprocessCommand {
             return Ok(ExecutionExitCode::GeneralError.into());
         }
 
+        // A coprocess runs beside the shell; with one thread (WASI) it could not.
+        if cfg!(target_family = "wasm") {
+            return Err(error::ErrorKind::NotSupportedOnThisPlatform("coproc").into());
+        }
+
         // Set up the pipes that we'll use to communicate with the coprocess.
-        let (stdin_reader, stdin_writer) = std::io::pipe()?;
-        let (stdout_reader, stdout_writer) = std::io::pipe()?;
+        let (stdin_reader, stdin_writer) = sys::pipes::pipe()?;
+        let (stdout_reader, stdout_writer) = sys::pipes::pipe()?;
 
         // Allocate new fds in the (parent) shell for the read end of the coprocess's stdout
         // and the write end of the coprocess's stdin.
@@ -1924,10 +1929,40 @@ fn setup_process_substitution(
     let mut child_params = params.clone();
     child_params.process_group_policy = ProcessGroupPolicy::SameProcessGroup;
 
+    // On WASI there is one thread: `<(cmd)` runs now, to its end, and is read from memory.
+    // (`>(cmd)` would need `cmd` to run while the data is still being written.)
+    #[cfg(target_family = "wasm")]
+    let target_file = match kind {
+        ast::ProcessSubstitutionKind::Read => {
+            let (sink_file, sink) = sys::memfile::memory_sink();
+            child_params
+                .open_files
+                .set_fd(OpenFiles::STDOUT_FD, sink_file);
+            let subshell_cmd = subshell_cmd.to_owned();
+            futures::executor::block_on(async {
+                // Intentionally ignore the result of the subshell command.
+                let _ = subshell_cmd
+                    .list
+                    .execute(&mut subshell, &child_params)
+                    .await;
+            });
+            sys::memfile::memory_source(&String::from_utf8_lossy(&sink.take()))
+        }
+        ast::ProcessSubstitutionKind::Write => {
+            return Err(error::ErrorKind::NotSupportedOnThisPlatform(
+                "output process substitution >(...)",
+            )
+            .into());
+        }
+    };
+
     // Set up pipe so we can connect to the command.
-    let (reader, writer) = std::io::pipe()?;
+    #[cfg(not(target_family = "wasm"))]
+    let (reader, writer) = sys::pipes::pipe()?;
+    #[cfg(not(target_family = "wasm"))]
     let (reader, writer) = (reader.into(), writer.into());
 
+    #[cfg(not(target_family = "wasm"))]
     let target_file = match kind {
         ast::ProcessSubstitutionKind::Read => {
             child_params.open_files.set_fd(OpenFiles::STDOUT_FD, writer);
@@ -1941,14 +1976,17 @@ fn setup_process_substitution(
 
     // Asynchronously spawn off the subshell; we intentionally don't block on its
     // completion.
-    let subshell_cmd = subshell_cmd.to_owned();
-    tokio::spawn(async move {
-        // Intentionally ignore the result of the subshell command.
-        let _ = subshell_cmd
-            .list
-            .execute(&mut subshell, &child_params)
-            .await;
-    });
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let subshell_cmd = subshell_cmd.to_owned();
+        tokio::spawn(async move {
+            // Intentionally ignore the result of the subshell command.
+            let _ = subshell_cmd
+                .list
+                .execute(&mut subshell, &child_params)
+                .await;
+        });
+    }
 
     // Starting at 63 (a.k.a. 64-1)--and decrementing--look for an
     // available fd.
@@ -1963,8 +2001,14 @@ fn setup_process_substitution(
     Ok((candidate_fd_num, target_file))
 }
 
+#[cfg(target_family = "wasm")]
 fn setup_open_file_with_contents(contents: &str) -> Result<OpenFile, error::Error> {
-    let (reader, mut writer) = std::io::pipe()?;
+    Ok(sys::memfile::memory_source(contents))
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn setup_open_file_with_contents(contents: &str) -> Result<OpenFile, error::Error> {
+    let (reader, mut writer) = sys::pipes::pipe()?;
 
     let bytes = contents.as_bytes();
 
