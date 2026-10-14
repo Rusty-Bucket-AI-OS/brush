@@ -53,12 +53,19 @@ pub(crate) use platform::users;
 pub use platform::PlatformError;
 
 /// The shell's own process ID. WASI has none: a number from the clock stands in for it, so
-/// that names built from `$$` differ between runs.
+/// that names built from `$$` differ between runs. A background job is a new shell that reports
+/// the number of the shell that started it (`$$` is the script's in a bash subshell too).
 pub(crate) fn current_pid() -> u32 {
     #[cfg(target_family = "wasm")]
     {
         static PID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
         *PID.get_or_init(|| {
+            if let Some(inherited) = std::env::var(platform::env::PARENT_PID_VAR)
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+            {
+                return inherited;
+            }
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(1, |d| d.subsec_nanos());

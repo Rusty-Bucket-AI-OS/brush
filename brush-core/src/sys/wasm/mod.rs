@@ -3,6 +3,7 @@
 
 pub mod async_pipe;
 pub(crate) mod background;
+mod background_vars;
 pub use crate::sys::stubs::commands;
 pub(crate) mod env;
 pub use crate::sys::stubs::fd;

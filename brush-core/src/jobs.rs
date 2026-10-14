@@ -203,8 +203,8 @@ impl JobManager {
     }
 
     /// Waits until fewer than `limit` jobs are running. A job whose streams the shell has to carry
-    /// is waited for (that is what carries them); the others are asked after every few
-    /// milliseconds.
+    /// is waited for (that is what carries them); for the others the host is asked to wake
+    /// this shell when any child ends, so nothing polls.
     #[cfg(target_family = "wasm")]
     pub async fn wait_for_slot(&mut self, limit: usize) -> Result<(), error::Error> {
         while self.running_count() >= limit {
@@ -214,8 +214,9 @@ impl JobManager {
                 .find(|j| j.tasks.iter().any(|t| !t.is_pollable()))
             {
                 job.wait().await?;
-            } else {
-                std::thread::sleep(std::time::Duration::from_millis(5));
+            } else if sys::background::wait_for_any_child().is_err() {
+                // No child is left for the host to wait for: the count is stale, count again.
+                std::thread::yield_now();
             }
         }
         Ok(())

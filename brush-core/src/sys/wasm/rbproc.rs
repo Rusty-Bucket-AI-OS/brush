@@ -26,6 +26,19 @@ pub(crate) const ENOENT: u32 = 44;
 /// The WASI errno for "try again": a child that is still running, asked without waiting.
 const EAGAIN: u32 = 6;
 
+/// The host's "any child" process number for `wait`.
+const ANY_CHILD: u32 = u32::MAX;
+
+/// How children that `wait_any` collected ended, until their own `wait` or `try_wait` asks: the
+/// host forgets a child once it reports it.
+fn reaped() -> std::sync::MutexGuard<'static, std::collections::BTreeMap<u32, i32>> {
+    static REAPED: std::sync::Mutex<std::collections::BTreeMap<u32, i32>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    REAPED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// The most arguments or variables in one request, and the longest single string (the host's
 /// limits).
 const MAX_ITEMS: usize = 1024;
@@ -120,6 +133,9 @@ pub(crate) fn spawn(request: &Request<'_>) -> std::io::Result<u32> {
 
 /// Waits for the child and returns its exit code (the low eight bits; 128 plus the signal).
 pub(crate) fn wait(pid: u32) -> std::io::Result<i32> {
+    if let Some(code) = reaped().remove(&pid) {
+        return Ok(code);
+    }
     let mut out = [0u32; 2];
     // SAFETY: `out` is a live array of the two `u32`s the host writes (the status, then the pid).
     let errno = unsafe { host_wait(pid, 0, out.as_mut_ptr()) };
@@ -131,6 +147,9 @@ pub(crate) fn wait(pid: u32) -> std::io::Result<i32> {
 
 /// Asks about the child without waiting: its exit code if it has ended, `None` while it runs.
 pub(crate) fn try_wait(pid: u32) -> std::io::Result<Option<i32>> {
+    if let Some(code) = reaped().remove(&pid) {
+        return Ok(Some(code));
+    }
     let mut out = [0u32; 2];
     // SAFETY: as for `wait`; flag 1 is the host's `WNOHANG`.
     let errno = unsafe { host_wait(pid, 1, out.as_mut_ptr()) };
@@ -139,6 +158,19 @@ pub(crate) fn try_wait(pid: u32) -> std::io::Result<Option<i32>> {
         EAGAIN => Ok(None),
         _ => Err(errno_error(errno)),
     }
+}
+
+/// Blocks until any child has ended (the host wakes this program exactly then) and keeps how it
+/// ended for its own `wait` or `try_wait`. An error means there is no child to wait for.
+pub(crate) fn wait_any() -> std::io::Result<()> {
+    let mut out = [0u32; 2];
+    // SAFETY: as for `wait`; the pid `ANY_CHILD` is the host's "any child".
+    let errno = unsafe { host_wait(ANY_CHILD, 0, out.as_mut_ptr()) };
+    if errno != 0 {
+        return Err(errno_error(errno));
+    }
+    reaped().insert(out[1], out[0] as i32);
+    Ok(())
 }
 
 /// Ends a child.

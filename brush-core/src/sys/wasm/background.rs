@@ -5,21 +5,26 @@
 //! sets comes back, which is also true of a subshell in bash. The job is tracked like any other
 //! child, so `jobs`, `wait`, `$!` and `kill` work on it.
 
-use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::io::Write as _;
 
 use crate::interp::ExecutionParameters;
 use crate::openfiles::OpenFiles;
-use crate::variables::ShellValue;
 use crate::{ErrorKind, Shell, error, extensions, processes};
 
+use super::background_vars::declarations;
+use super::env::PARENT_PID_VAR;
 use super::process::Child;
 use super::rbproc::{self, NO_FD};
 use super::spawn::{Pump, connect};
 
 /// The most background jobs that run at once; a further one waits for a slot.
 pub const MAX_RUNNING_JOBS: usize = 8;
+
+/// Blocks until a child of this shell ends (the host wakes the shell then).
+pub(crate) fn wait_for_any_child() -> std::io::Result<()> {
+    rbproc::wait_any()
+}
 
 /// The longest command text (with what it needs) one job is given: the host limits one argument.
 const MAX_TEXT: usize = 30_000;
@@ -33,16 +38,12 @@ fn shell_program() -> String {
         .unwrap_or_else(|| "brush".to_owned())
 }
 
-/// The words (runs of letters, digits and underscores) of a text.
-fn words(text: &str) -> HashSet<&str> {
-    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .filter(|w| !w.is_empty())
-        .collect()
-}
-
 /// The text a job starts with: the functions and variables `text` mentions (and the functions
 /// those mention), then `text`.
-fn program_text<SE: extensions::ShellExtensions>(shell: &Shell<SE>, text: &str) -> String {
+fn program_text<SE: extensions::ShellExtensions>(
+    shell: &Shell<SE>,
+    text: &str,
+) -> Result<String, error::Error> {
     let mut included: Vec<(String, String)> = Vec::new();
     let mut scope = text.to_owned();
     loop {
@@ -70,33 +71,9 @@ fn program_text<SE: extensions::ShellExtensions>(shell: &Shell<SE>, text: &str) 
         out.push_str(definition);
         out.push('\n');
     }
-    let mentioned = words(&scope);
-    let mut vars: Vec<_> = shell
-        .env()
-        .iter()
-        .filter(|(name, var)| {
-            mentioned.contains(name.as_str())
-                && !var.is_exported()
-                && !var.is_readonly()
-                && !var.is_treated_as_nameref()
-                && crate::env::valid_variable_name(name)
-        })
-        .collect();
-    vars.sort_by(|a, b| a.0.cmp(b.0));
-    for (name, var) in vars {
-        let value = var.value();
-        let keyword = match value {
-            ShellValue::String(_) => "",
-            ShellValue::IndexedArray(_) => "declare -a ",
-            ShellValue::AssociativeArray(_) => "declare -A ",
-            ShellValue::Unset(_) | ShellValue::Dynamic { .. } => continue,
-        };
-        if let Ok(assignable) = value.to_assignable_str(None, shell) {
-            let _ = writeln!(out, "{keyword}{name}={assignable}");
-        }
-    }
+    out.push_str(&declarations(shell, &scope)?);
     out.push_str(text);
-    out
+    Ok(out)
 }
 
 /// Starts `text` as a background job and returns the child to track. `shell` is the shell the job
@@ -106,10 +83,10 @@ pub(crate) fn spawn_background<SE: extensions::ShellExtensions>(
     params: &ExecutionParameters,
     text: &str,
 ) -> Result<processes::ChildProcess, error::Error> {
-    let program = program_text(shell, text);
+    let program = program_text(shell, text)?;
     if program.len() > MAX_TEXT {
         return Err(error::ErrorKind::Unimplemented(
-            "a background job whose command and the functions and variables it uses are over 30,000 bytes",
+            "a background job whose command, functions, variables and read-only variables are over 30,000 bytes (it was not started)",
         )
         .into());
     }
@@ -137,6 +114,12 @@ pub(crate) fn spawn_background<SE: extensions::ShellExtensions>(
             .map(|(k, v)| (k.clone(), v.value().to_cow_str(shell).into_owned()))
             .collect();
         env.push(("_".to_owned(), program_name.clone()));
+        // `$$` in the job is the script's, as in a bash subshell.
+        env.retain(|(k, _)| k != PARENT_PID_VAR);
+        env.push((
+            PARENT_PID_VAR.to_owned(),
+            crate::sys::current_pid().to_string(),
+        ));
         env
     };
 
